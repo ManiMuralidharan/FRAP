@@ -1,0 +1,164 @@
+% Load data from CSV files
+Controldata = readmatrix('Control.csv', 'NumHeaderLines', 1); % Adjust header lines!
+RLdata = readmatrix('Reference.csv', 'NumHeaderLines', 1); % Adjust header lines!
+
+% Display and check the size (Crucial!)
+disp(['Controldata size: ', num2str(size(Controldata))]); 
+disp(['Referencedata size: ', num2str(size(Referencedata))]); 
+disp('Controldata:');  
+disp(Controldata);
+disp('Referencedata:');  
+
+% Extract time vector 
+numFrames = size(Controldata, 1);  % Assuming Controldata and Referencedata have the same number of rows
+time = (0:numFrames-1) * 0.995; % Time in sec
+
+% Double normalize the data
+Controlnormalized = doubleNormalize(Controldata);
+Referencenormalized = doubleNormalize(Referencedata);
+
+% Fit the data and calculate half-lives
+[Controlfits, ControlhalfLives, Controlparams, Controlgofs] = fitAndGetHalfLife(time, Controlnormalized); % Capture gofs
+[Referencefits, ReferencehalfLives, Referenceparams, Referencegofs] = fitAndGetHalfLife(time, Referencenormalized); % Capture gofs
+
+% Display or save the results (e.g., half-lives and R-squared)
+disp('Control Half-lives:');
+disp(ControlhalfLives);
+disp('Reference Half-lives:');
+disp(ReferencehalfLives);
+
+% Display R-squared values (example)
+for i = 1:length(Controlgofs)
+    if ~isempty(Controlgofs{i})
+        fprintf('Control ROI %d: R-squared = %f\n', i, Controlgofs{i}.rsquare);
+    else
+        fprintf('Control ROI %d: Fit failed\n', i);
+    end
+end
+
+for i = 1:length(Referencegofs)
+    if ~isempty(Referencegofs{i})
+        fprintf('Reference ROI %d: R-squared = %f\n', i, RLgofs{i}.rsquare);
+    else
+        fprintf('Reference ROI %d: Fit failed\n', i);
+    end
+end
+
+
+% Plotting Example (loop through all ROIs and datasets)
+figure;
+
+% Control Plots
+for i = 1:size(Controlnormalized, 2)
+    subplot(2, size(Controlnormalized, 2), i); % Create subplots
+    plot(time, Controlnormalized(:, i), 'o', 'DisplayName', 'Data'); % Original data with DisplayName
+    hold on;
+    if ~isempty(Controlfits{i}) % Check if the fit exists
+        fittedCurve = predict(Controlfits{i}, time'); % Use predict
+        plot(time, fittedCurve, 'r-', 'DisplayName', 'Fit'); % Fitted curve with DisplayName
+    end
+    xlabel('Time (s)');
+    ylabel('Normalized Fluorescence');
+    title(['Control ROI ', num2str(i)]);
+
+    % Add legend ONLY AFTER plotting both data and fit
+    if ~isempty(Controlfits{i}) % Only add legend if fit exists
+        legend(); % This will use the DisplayNames
+    end
+
+    hold off;
+end
+
+% Reference Plots
+for i = 1:size(Referencenormalized, 2)
+    subplot(2, size(Referencenormalized, 2), i + size(Controlnormalized, 2)); % Create subplots (offset)
+    plot(time, Referencenormalized(:, i), 'o', 'DisplayName', 'Data'); % Original data with DisplayName
+    hold on;
+    if ~isempty(Referencefits{i}) % Check if the fit exists
+       fittedCurve = predict(Referencefits{i}, time'); % Use predict
+        plot(time, fittedCurve, 'r-', 'DisplayName', 'Fit'); % Fitted curve with DisplayName
+    end
+    xlabel('Time (s)');
+    ylabel('Normalized Fluorescence');
+    title(['Reference ROI ', num2str(i)]);
+
+    % Add legend ONLY AFTER plotting both data and fit
+    if ~isempty(Referencefits{i}) % Only add legend if fit exists
+        legend(); % This will use the DisplayNames
+    end
+
+    hold off;
+end
+
+% ------------------- Local Functions -------------------
+function normalizedData = doubleNormalize(data)
+    numCols = size(data, 2);
+    if mod(numCols, 2) ~= 0
+        error('Number of columns must be even (Bleach and Reference pairs).');
+    end
+    numBleachCols = numCols / 2; % Number of bleach columns (and normalized columns)
+    normalizedData = zeros(size(data, 1), numBleachCols); % Preallocate CORRECTLY
+    for i = 1:2:numCols  % Iterate over bleach columns
+        bleach = data(:, i);
+        reference = data(:, i+1);
+        bleachCorr = bleach - mean(data(:,i+1)); % Subtract mean reference as background
+        % Check for and handle negative values after background subtraction
+        bleachCorr(bleachCorr < 0) = 0;
+        meanRef = mean(reference);
+        normBleach = bleachCorr / meanRef;
+        preBleachMean = mean(normBleach(1:10)); % Adjust 10 if needed
+        normalizedData(:, (i+1)/2) = normBleach / preBleachMean; % Store normalized data in the correct column
+    end
+end
+
+
+function y = doubleExp(t, params)  % This function IS STILL NEEDED
+    A = params(1);
+    B1 = params(2);
+    tau1 = params(3);
+    B2 = params(4);
+    tau2 = params(5);
+    y = A * (1 - B1 * exp(-t/tau1) - B2 * exp(-t/tau2));
+end
+
+function [fits, halfLives, params, gofs] = fitAndGetHalfLife(time, data)
+    numROIs = size(data, 2);
+    fits = cell(1, numROIs);
+    halfLives = zeros(1, numROIs);
+    params = cell(1, numROIs);
+    gofs = cell(1, numROIs); % Initialize gofs cell array
+
+    for i = 1:numROIs
+        roiData = data(:, i);
+        % Initial parameter guesses (improve these if necessary)
+        A0 = max(roiData);
+        B10 = 0.5;
+        tau10 = 5;
+        B20 = 0.5;
+        tau20 = 2 * tau10;
+        params0 = [A0, B10, tau10, B20, tau20];
+        % Fit the double exponential model (Corrected)
+        doubleExpModel = @(t, params) params(1)*(1 - params(2)*exp(-t/params(3)) - params(4)*exp(-t/params(5))); % Function handle
+        try
+            [fitresult, gof] = fit(time', roiData, doubleExpModel, 'StartPoint', params0, 'Independent', 't'); % Corrected line
+            fits{i} = fitresult;
+            fittedParams = coeffvalues(fitresult);
+            params{i} = fittedParams;
+            gofs{i} = gof; % Store gof structure
+            % Calculate half-life numerically (time to 50% decay) - STILL NEEDS doubleExp
+            decayCurve = doubleExp(time, fittedParams); % Use the function here
+            initialAmplitude = fittedParams(1); %A
+            halfAmplitude = initialAmplitude/2;
+            % Find time when decayCurve is closest to halfAmplitude
+            [~, halfLifeIndex] = min(abs(decayCurve - halfAmplitude));
+            halfLives(i) = time(halfLifeIndex);
+        catch ME % Handle fitting errors
+            warning(['Fit failed for ROI ', num2str(i), ': ', ME.message]);
+            fits{i} = [];
+            halfLives(i) = NaN;
+            params{i} = NaN;
+            gofs{i} = []; % Store empty gof if fit fails
+        end % End of try block
+    end
+end
+% ------------------- End Local Functions -------------------
